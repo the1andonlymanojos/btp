@@ -12,13 +12,8 @@ import numpy as np
 import pandas as pd
 from tensorflow import keras
 import cv2
-
+from tcn import TCN
 from extract_human_pose import HumanPoseExtractor
-
-physical_devices = tf.config.experimental.list_physical_devices("GPU")
-print(tf.config.experimental.list_physical_devices("GPU"))
-tf.config.experimental.set_memory_growth(physical_devices[0], True)
-print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices("GPU")))
 
 
 class ShotCounter:
@@ -29,200 +24,165 @@ class ShotCounter:
 
     MIN_FRAMES_BETWEEN_SHOTS = 60
 
-    def __init__(self):
+    def __init__(self, threshold=None):
         self.nb_history = 30
-        self.probs = np.zeros(4)
+        self.probs = np.zeros(7)  # Updated to 7 classes
 
         self.nb_forehands = 0
         self.nb_backhands = 0
         self.nb_serves = 0
+        self.nb_backhand_slices = 0
+        self.nb_backhand_volleys = 0
+        self.nb_forehand_volleys = 0
 
         self.last_shot = "neutral"
         self.frames_since_last_shot = self.MIN_FRAMES_BETWEEN_SHOTS
 
         self.results = []
+        
+        # Set threshold - use provided value or default thresholds
+        if threshold is not None:
+            # Use the same threshold for all shot types
+            self.thresholds = {
+                0: threshold,  # backhand
+                1: threshold,  # backhand_slice
+                2: threshold,  # backhand_volley
+                3: threshold,  # forehand
+                4: threshold,  # forehand_volley
+                6: threshold,  # serve
+            }
+        else:
+            # Use default thresholds
+            self.thresholds = {
+                0: 0.98,  # backhand
+                1: 0.97,  # backhand_slice
+                2: 0.97,  # backhand_volley
+                3: 0.98,  # forehand
+                4: 0.97,  # forehand_volley
+                6: 0.98,  # serve (model is confident here)
+            }
 
     def update(self, probs, frame_id):
         """Update current state with shot probabilities"""
+        shot_names = [
+            "backhand", "backhand_slice", "backhand_volley",
+            "forehand", "forehand_volley", "overhead", "serve"
+        ]
 
-        if len(probs) == 4:
+        if len(probs) == 7:
             self.probs = probs
         else:
-            self.probs[0:3] = probs
+            # Handle cases where model outputs different number of classes
+            self.probs[:len(probs)] = probs
 
-        if (
-            probs[0] > 0.98
-            and self.frames_since_last_shot > self.MIN_FRAMES_BETWEEN_SHOTS
-        ):
-            self.nb_backhands += 1
-            self.last_shot = "backhand"
-            self.frames_since_last_shot = 0
-            self.results.append({"FrameID": frame_id, "Shot": self.last_shot})
-        elif (
-            probs[1] > 0.98
-            and self.frames_since_last_shot > self.MIN_FRAMES_BETWEEN_SHOTS
-        ):
-            self.nb_forehands += 1
-            self.last_shot = "forehand"
-            self.frames_since_last_shot = 0
-            self.results.append({"FrameID": frame_id, "Shot": self.last_shot})
-        elif (
-            len(probs) > 3
-            and probs[3] > 0.98
-            and self.frames_since_last_shot > self.MIN_FRAMES_BETWEEN_SHOTS
-        ):
-            self.nb_serves += 1
-            self.last_shot = "serve"
-            self.frames_since_last_shot = 0
-            self.results.append({"FrameID": frame_id, "Shot": self.last_shot})
+        for i, prob in enumerate(probs):
+            if prob > self.thresholds.get(i, 0.98) and self.frames_since_last_shot > self.MIN_FRAMES_BETWEEN_SHOTS:
+                self.last_shot = shot_names[i]
+                self.frames_since_last_shot = 0
+                self.results.append({"FrameID": frame_id, "Shot": self.last_shot})
+                print(f"Shot detected: {self.last_shot} at frame {frame_id}")
+
+                if i == 0: self.nb_backhands += 1
+                elif i == 1: self.nb_backhand_slices += 1
+                elif i == 2: self.nb_backhand_volleys += 1
+                elif i == 3: self.nb_forehands += 1
+                elif i == 4: self.nb_forehand_volleys += 1
+                elif i == 6: self.nb_serves += 1
+                break  # only fire one per frame
 
         self.frames_since_last_shot += 1
 
     def display(self, frame):
         """Display counter"""
-        cv2.putText(
-            frame,
-            f"Backhands = {self.nb_backhands}",
-            (20, frame.shape[0] - 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(0, 255, 0)
-            if (self.last_shot == "backhand" and self.frames_since_last_shot < 30)
-            else (0, 0, 255),
-            thickness=2,
-        )
-        cv2.putText(
-            frame,
-            f"Forehands = {self.nb_forehands}",
-            (20, frame.shape[0] - 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(0, 255, 0)
-            if (self.last_shot == "forehand" and self.frames_since_last_shot < 30)
-            else (0, 0, 255),
-            thickness=2,
-        )
-        cv2.putText(
-            frame,
-            f"Serves = {self.nb_serves}",
-            (20, frame.shape[0] - 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(0, 255, 0)
-            if (self.last_shot == "serve" and self.frames_since_last_shot < 30)
-            else (0, 0, 255),
-            thickness=2,
-        )
+        y_positions = [frame.shape[0] - 160, frame.shape[0] - 130, frame.shape[0] - 100, 
+                      frame.shape[0] - 70, frame.shape[0] - 40, frame.shape[0] - 10]
+        
+        shots_info = [
+            (f"Backhands = {self.nb_backhands}", "backhand"),
+            (f"Backhand Slices = {self.nb_backhand_slices}", "backhand_slice"),
+            (f"Backhand Volleys = {self.nb_backhand_volleys}", "backhand_volley"),
+            (f"Forehands = {self.nb_forehands}", "forehand"),
+            (f"Forehand Volleys = {self.nb_forehand_volleys}", "forehand_volley"),
+            (f"Serves = {self.nb_serves}", "serve")
+        ]
+        
+        for i, (text, shot_type) in enumerate(shots_info):
+            cv2.putText(
+                frame,
+                text,
+                (20, y_positions[i]),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=0.7,
+                color=(0, 255, 0)
+                if (self.last_shot == shot_type and self.frames_since_last_shot < 30)
+                else (0, 0, 255),
+                thickness=2,
+            )
 
 
-BAR_WIDTH = 30
-BAR_HEIGHT = 170
+BAR_WIDTH = 25
+BAR_HEIGHT = 150
 MARGIN_ABOVE_BAR = 30
-SPACE_BETWEEN_BARS = 55
-TEXT_ORIGIN_X = 1075
-BAR_ORIGIN_X = 1070
+SPACE_BETWEEN_BARS = 35
+TEXT_ORIGIN_X = 950
+BAR_ORIGIN_X = 945
 
 
 def draw_probs(frame, probs):
     """Draw vertical bars representing probabilities"""
-
-    cv2.putText(
-        frame,
-        "S",
-        (TEXT_ORIGIN_X, 230),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        fontScale=1,
-        color=(0, 0, 255),
-        thickness=3,
-    )
-    cv2.putText(
-        frame,
-        "B",
-        (TEXT_ORIGIN_X + SPACE_BETWEEN_BARS, 230),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        fontScale=1,
-        color=(0, 0, 255),
-        thickness=3,
-    )
-    cv2.putText(
-        frame,
-        "N",
-        (TEXT_ORIGIN_X + SPACE_BETWEEN_BARS * 2, 230),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        fontScale=1,
-        color=(0, 0, 255),
-        thickness=3,
-    )
-    cv2.putText(
-        frame,
-        "F",
-        (TEXT_ORIGIN_X + SPACE_BETWEEN_BARS * 3, 230),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        fontScale=1,
-        color=(0, 0, 255),
-        thickness=3,
-    )
-    cv2.rectangle(
-        frame,
-        (
-            BAR_ORIGIN_X,
-            int(BAR_HEIGHT + MARGIN_ABOVE_BAR - BAR_HEIGHT * probs[3]),
-        ),
-        (BAR_ORIGIN_X + BAR_WIDTH, BAR_HEIGHT + MARGIN_ABOVE_BAR),
-        color=(0, 0, 255),
-        thickness=-1,
-    )
-
-    cv2.rectangle(
-        frame,
-        (
-            BAR_ORIGIN_X + SPACE_BETWEEN_BARS,
-            int(BAR_HEIGHT + MARGIN_ABOVE_BAR - BAR_HEIGHT * probs[0]),
-        ),
-        (
-            BAR_ORIGIN_X + SPACE_BETWEEN_BARS + BAR_WIDTH,
-            BAR_HEIGHT + MARGIN_ABOVE_BAR,
-        ),
-        color=(0, 0, 255),
-        thickness=-1,
-    )
-    cv2.rectangle(
-        frame,
-        (
-            BAR_ORIGIN_X + SPACE_BETWEEN_BARS * 2,
-            int(BAR_HEIGHT + MARGIN_ABOVE_BAR - BAR_HEIGHT * probs[2]),
-        ),
-        (
-            BAR_ORIGIN_X + SPACE_BETWEEN_BARS * 2 + BAR_WIDTH,
-            BAR_HEIGHT + MARGIN_ABOVE_BAR,
-        ),
-        color=(0, 0, 255),
-        thickness=-1,
-    )
-    cv2.rectangle(
-        frame,
-        (
-            BAR_ORIGIN_X + SPACE_BETWEEN_BARS * 3,
-            int(BAR_HEIGHT + MARGIN_ABOVE_BAR - BAR_HEIGHT * probs[1]),
-        ),
-        (
-            BAR_ORIGIN_X + SPACE_BETWEEN_BARS * 3 + BAR_WIDTH,
-            BAR_HEIGHT + MARGIN_ABOVE_BAR,
-        ),
-        color=(0, 0, 255),
-        thickness=-1,
-    )
-    for i in range(4):
+    
+    # Ensure we have 7 probabilities
+    if len(probs) < 7:
+        probs = np.pad(probs, (0, 7 - len(probs)), 'constant')
+    
+    # Labels for each shot type (shortened to fit)
+    labels = ["BH", "BS", "BV", "FH", "FV", "N", "S"]
+    
+    # Colors for each bar (BGR format)
+    colors = [
+        (255, 0, 0),    # Blue for backhand
+        (255, 100, 0),  # Light blue for backhand slice
+        (255, 200, 0),  # Cyan for backhand volley
+        (0, 255, 0),    # Green for forehand
+        (0, 255, 100),  # Light green for forehand volley
+        (128, 128, 128), # Gray for neutral
+        (0, 0, 255)     # Red for serve
+    ]
+    
+    # Mapping of probabilities to correct indices
+    # probs order: [backhand, backhand_slice, backhand_volley, forehand, forehand_volley, neutral, serve]
+    prob_indices = [0, 1, 2, 3, 4, 5, 6]
+    
+    for i, (label, color, prob_idx) in enumerate(zip(labels, colors, prob_indices)):
+        x_pos = TEXT_ORIGIN_X + SPACE_BETWEEN_BARS * i
+        bar_x_pos = BAR_ORIGIN_X + SPACE_BETWEEN_BARS * i
+        
+        # Draw label
+        cv2.putText(
+            frame,
+            label,
+            (x_pos, 250),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            fontScale=0.6,
+            color=(0, 0, 255),
+            thickness=2,
+        )
+        
+        # Draw probability bar
+        bar_height = int(BAR_HEIGHT * probs[prob_idx])
         cv2.rectangle(
             frame,
-            (
-                BAR_ORIGIN_X + SPACE_BETWEEN_BARS * i,
-                int(MARGIN_ABOVE_BAR),
-            ),
-            (
-                BAR_ORIGIN_X + SPACE_BETWEEN_BARS * i + BAR_WIDTH,
-                BAR_HEIGHT + MARGIN_ABOVE_BAR,
-            ),
+            (bar_x_pos, BAR_HEIGHT + MARGIN_ABOVE_BAR - bar_height),
+            (bar_x_pos + BAR_WIDTH, BAR_HEIGHT + MARGIN_ABOVE_BAR),
+            color=color,
+            thickness=-1,
+        )
+        
+        # Draw white border around bar
+        cv2.rectangle(
+            frame,
+            (bar_x_pos, MARGIN_ABOVE_BAR),
+            (bar_x_pos + BAR_WIDTH, BAR_HEIGHT + MARGIN_ABOVE_BAR),
             color=(255, 255, 255),
             thickness=1,
         )
@@ -239,48 +199,86 @@ class GT:
         self.nb_backhands = 0
         self.nb_forehands = 0
         self.nb_serves = 0
+        self.nb_backhand_slices = 0
+        self.nb_backhand_volleys = 0
+        self.nb_forehand_volleys = 0
         self.last_shot = "neutral"
+        
+        # Debug: Print total GT counts for each class
+        self._print_gt_totals()
+    
+    def _print_gt_totals(self):
+        """Print total GT counts for each shot class"""
+        print("\n" + "="*50)
+        print("GROUND TRUTH SHOT COUNTS:")
+        print("="*50)
+        
+        # Print all values in self.shots
+        print("Complete Ground Truth Data:")
+        print(self.shots.to_string())
+        print("\n" + "-"*50)
+        
+        # Count total shots for each class
+        total_backhands = len(self.shots[self.shots['Shot'] == 'backhand'])
+        total_forehands = len(self.shots[self.shots['Shot'] == 'forehand'])
+        total_serves = len(self.shots[self.shots['Shot'] == 'overhead'])
+        total_backhand_slices = len(self.shots[self.shots['Shot'] == 'backhand-slice'])
+        total_backhand_volleys = len(self.shots[self.shots['Shot'] == 'backhand-volley'])
+        total_forehand_volleys = len(self.shots[self.shots['Shot'] == 'forehand-volley'])
+        
+        print("Summary by Shot Type:")
+        print(f"Total Backhands: {total_backhands}")
+        print(f"Total Forehands: {total_forehands}")
+        print(f"Total Serves: {total_serves}")
+        print(f"Total Backhand Slices: {total_backhand_slices}")
+        print(f"Total Backhand Volleys: {total_backhand_volleys}")
+        print(f"Total Forehand Volleys: {total_forehand_volleys}")
+        print(f"Total Shots: {len(self.shots)}")
+        print("="*50 + "\n")
 
     def display(self, frame, frame_id):
         """Display shot counter"""
         if self.current_row_in_shots < len(self.shots):
             if frame_id == self.shots.iloc[self.current_row_in_shots]["FrameId"]:
-                if self.shots.iloc[self.current_row_in_shots]["Shot"] == "backhand":
+                shot_type = self.shots.iloc[self.current_row_in_shots]["Shot"]
+                if shot_type == "backhand":
                     self.nb_backhands += 1
-                elif self.shots.iloc[self.current_row_in_shots]["Shot"] == "forehand":
+                elif shot_type == "forehand":
                     self.nb_forehands += 1
-                elif self.shots.iloc[self.current_row_in_shots]["Shot"] == "serve":
+                elif shot_type == "serve":
                     self.nb_serves += 1
-                self.last_shot = self.shots.iloc[self.current_row_in_shots]["Shot"]
+                elif shot_type == "backhand_slice":
+                    self.nb_backhand_slices += 1
+                elif shot_type == "backhand_volley":
+                    self.nb_backhand_volleys += 1
+                elif shot_type == "forehand_volley":
+                    self.nb_forehand_volleys += 1
+                self.last_shot = shot_type
                 self.current_row_in_shots += 1
 
-        cv2.putText(
-            frame,
-            f"Backhands = {self.nb_backhands}",
-            (frame.shape[1] - 300, frame.shape[0] - 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(0, 0, 255) if self.last_shot != "backhand" else (0, 255, 0),
-            thickness=2,
-        )
-        cv2.putText(
-            frame,
-            f"Forehands = {self.nb_forehands}",
-            (frame.shape[1] - 300, frame.shape[0] - 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(0, 0, 255) if self.last_shot != "forehand" else (0, 255, 0),
-            thickness=2,
-        )
-        cv2.putText(
-            frame,
-            f"Serves = {self.nb_serves}",
-            (frame.shape[1] - 300, frame.shape[0] - 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            fontScale=1,
-            color=(0, 0, 255) if self.last_shot != "serve" else (0, 255, 0),
-            thickness=2,
-        )
+        # Display counters on the right side of the frame
+        y_positions = [frame.shape[0] - 160, frame.shape[0] - 130, frame.shape[0] - 100, 
+                      frame.shape[0] - 70, frame.shape[0] - 40, frame.shape[0] - 10]
+        
+        shots_info = [
+            (f"GT BH = {self.nb_backhands}", "backhand"),
+            (f"GT BS = {self.nb_backhand_slices}", "backhand_slice"),
+            (f"GT BV = {self.nb_backhand_volleys}", "backhand_volley"),
+            (f"GT FH = {self.nb_forehands}", "forehand"),
+            (f"GT FV = {self.nb_forehand_volleys}", "forehand_volley"),
+            (f"GT S = {self.nb_serves}", "serve")
+        ]
+        
+        for i, (text, shot_type) in enumerate(shots_info):
+            cv2.putText(
+                frame,
+                text,
+                (frame.shape[1] - 200, y_positions[i]),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fontScale=0.6,
+                color=(0, 255, 0) if self.last_shot == shot_type else (0, 0, 255),
+                thickness=2,
+            )
 
 
 def draw_fps(frame, fps):
@@ -322,6 +320,10 @@ def compute_recall_precision(gt, shots):
     fp_backhands = 0
     fp_forehands = 0
     fp_serves = 0
+    fp_backhand_slices = 0
+    fp_backhand_volleys = 0
+    fp_forehand_volleys = 0
+    
     for gt_shot in gt_numpy:
         found_match = False
         for shot in shots:
@@ -349,19 +351,27 @@ def compute_recall_precision(gt, shots):
                 fp_forehands += 1
             elif shot["Shot"] == "serve":
                 fp_serves += 1
+            elif shot["Shot"] == "backhand_slice":
+                fp_backhand_slices += 1
+            elif shot["Shot"] == "backhand_volley":
+                fp_backhand_volleys += 1
+            elif shot["Shot"] == "forehand_volley":
+                fp_forehand_volleys += 1
 
-    precision = nb_match / (nb_match + nb_fp)
-    recall = nb_match / (nb_match + nb_misses)
+    precision = nb_match / (nb_match + nb_fp) if (nb_match + nb_fp) > 0 else 0
+    recall = nb_match / (nb_match + nb_misses) if (nb_match + nb_misses) > 0 else 0
 
     print(f"Recall {recall*100:.1f}%")
     print(f"Precision {precision*100:.1f}%")
 
-    print(
-        f"FP: backhands = {fp_backhands}, forehands = {fp_forehands}, serves = {fp_serves}"
-    )
+    print(f"FP: BH = {fp_backhands}, FH = {fp_forehands}, S = {fp_serves}")
+    print(f"FP: BS = {fp_backhand_slices}, BV = {fp_backhand_volleys}, FV = {fp_forehand_volleys}")
 
 
 if __name__ == "__main__":
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # or 'XVID' for .avi
+    out = cv2.VideoWriter("output_newold.mp4", fourcc, 60.0, (1280, 720))
+
     parser = ArgumentParser(
         description="Track tennis player and display shot probabilities"
     )
@@ -376,18 +386,27 @@ if __name__ == "__main__":
         default=False,
         help="If player is left-handed",
     )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        help="Confidence threshold for shot detection (0.0-1.0). If not provided, uses default thresholds for each shot type"
+    )
     args = parser.parse_args()
 
-    shot_counter = ShotCounter()
+    shot_counter = ShotCounter(threshold=args.threshold)
 
     if args.evaluate is not None:
         gt = GT(args.evaluate)
 
-    m1 = keras.models.load_model(args.model)
+    m1 = keras.models.load_model(args.model, custom_objects={"TCN": TCN})
 
     cap = cv2.VideoCapture(args.video)
 
     assert cap.isOpened()
+
+    # Get total frame count for progress tracking
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"Total frames to process: {total_frames}")
 
     ret, frame = cap.read()
 
@@ -400,6 +419,7 @@ if __name__ == "__main__":
     features_pool = []
 
     prev_time = time.time()
+    start_time = time.time()
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -408,6 +428,18 @@ if __name__ == "__main__":
             break
 
         FRAME_ID += 1
+
+        # Progress tracking every 100 frames
+        if FRAME_ID % 100 == 0:
+            elapsed_time = time.time() - start_time
+            progress_percent = (FRAME_ID / total_frames) * 100
+            frames_per_sec = FRAME_ID / elapsed_time
+            estimated_total_time = total_frames / frames_per_sec
+            estimated_remaining = estimated_total_time - elapsed_time
+            
+            print(f"Progress: {FRAME_ID}/{total_frames} frames ({progress_percent:.1f}%) | "
+                  f"Processing speed: {frames_per_sec:.1f} fps | "
+                  f"ETA: {estimated_remaining/60:.1f} minutes")
 
         if args.f is not None and FRAME_ID < args.f:
             continue
@@ -464,13 +496,20 @@ if __name__ == "__main__":
         # cv2.imshow("Frame", frame)
         human_pose_extractor.roi.update(human_pose_extractor.keypoints_pixels_frame)
 
-        cv2.imwrite(f"videos/image_{FRAME_ID:05d}.png", frame)
+        out.write(frame)
+
 
         # k = cv2.waitKey(0)
         # if k == 27:
         #    break
 
+    # Final progress update
+    total_time = time.time() - start_time
+    print(f"\nProcessing complete! Total time: {total_time/60:.1f} minutes")
+    print(f"Average processing speed: {total_frames/total_time:.1f} fps")
+
     cap.release()
+    out.release()
     cv2.destroyAllWindows()
 
     print(shot_counter.results)

@@ -80,10 +80,17 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    print(args.out)
     shots = pd.read_csv(args.annotation)
     CURRENT_ROW = 0
 
-    NB_IMAGES = 30
+    # Create output directory based on video filename
+    video_name = Path(args.video).stem  # Gets filename without extension
+    video_output_dir = Path(args.out) / video_name
+    video_output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Saving shots to: {video_output_dir}")
+
+    NB_IMAGES = 60
     shots_features = []
 
     FRAME_ID = 1
@@ -91,6 +98,10 @@ if __name__ == "__main__":
     IDX_BACKHAND = 1
     IDX_NEUTRAL = 1
     IDX_SERVE = 1
+    IDX_BACKHAND_SLICE = 1
+    IDX_BACKHAND_VOLLEY = 1
+    IDX_FOREHAND_VOLLEY = 1
+    IDX_OVERHEAD = 1
 
     cap = cv2.VideoCapture(args.video)
 
@@ -140,24 +151,37 @@ if __name__ == "__main__":
 
             if FRAME_ID - NB_IMAGES // 2 + 1 == shots.iloc[CURRENT_ROW]["FrameId"]:
                 # add assert?
-                shots_df = pd.DataFrame(
-                    np.concatenate(shots_features, axis=0),
-                    columns=columns,
-                )
+                data = np.concatenate(shots_features, axis=0)
+                shots_df = pd.DataFrame(data)
+                shots_df.columns = columns
                 shots_df["shot"] = np.full(NB_IMAGES, shot_class)
                 if shot_class == "forehand":
-                    outpath = Path(args.out).joinpath(
-                        f"forehand_{IDX_FOREHAND:03d}.csv"
-                    )
+                    outpath = video_output_dir / f"forehand_{IDX_FOREHAND:03d}.csv"
                     IDX_FOREHAND += 1
                 elif shot_class == "backhand":
-                    outpath = Path(args.out).joinpath(
-                        f"backhand_{IDX_BACKHAND:03d}.csv"
-                    )
+                    outpath = video_output_dir / f"backhand_{IDX_BACKHAND:03d}.csv"
                     IDX_BACKHAND += 1
                 elif shot_class == "serve":
-                    outpath = Path(args.out).joinpath(f"serve_{IDX_SERVE:03d}.csv")
+                    outpath = video_output_dir / f"serve_{IDX_SERVE:03d}.csv"
                     IDX_SERVE += 1
+                elif shot_class == "backhand-slice":
+                    outpath = video_output_dir / f"backhand_slice_{IDX_BACKHAND_SLICE:03d}.csv"
+                    IDX_BACKHAND_SLICE += 1
+                elif shot_class == "backhand-volley":
+                    outpath = video_output_dir / f"backhand_volley_{IDX_BACKHAND_VOLLEY:03d}.csv"
+                    IDX_BACKHAND_VOLLEY += 1
+                elif shot_class == "forehand-volley":
+                    outpath = video_output_dir / f"forehand_volley_{IDX_FOREHAND_VOLLEY:03d}.csv"
+                    IDX_FOREHAND_VOLLEY += 1
+                elif shot_class == "overhead":
+                    outpath = video_output_dir / f"overhead_{IDX_OVERHEAD:03d}.csv"
+                    IDX_OVERHEAD += 1
+                else:
+                    print(f"Warning: Unknown shot class '{shot_class}', skipping...")
+                    CURRENT_ROW += 1
+                    shots_features = []
+                    FRAME_ID += 1
+                    continue
 
                 shots_df.to_csv(outpath, index=False)
 
@@ -187,12 +211,11 @@ if __name__ == "__main__":
                 draw_shot(frame, "neutral")
 
                 if FRAME_ID == frame_id_between_shots + NB_IMAGES // 2:
-                    shots_df = pd.DataFrame(
-                        np.concatenate(shots_features, axis=0),
-                        columns=columns,
-                    )
+                    data = np.concatenate(shots_features, axis=0)
+                    shots_df = pd.DataFrame(data)
+                    shots_df.columns = columns
                     shots_df["shot"] = np.full(NB_IMAGES, "neutral")
-                    outpath = Path(args.out).joinpath(f"neutral_{IDX_NEUTRAL:03d}.csv")
+                    outpath = video_output_dir / f"neutral_{IDX_NEUTRAL:03d}.csv"
                     print(f"saving neutral to {outpath}")
                     IDX_NEUTRAL += 1
                     shots_df.to_csv(outpath, index=False)

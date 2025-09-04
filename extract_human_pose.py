@@ -196,7 +196,7 @@ class HumanPoseExtractor:
 
     def __init__(self, shape):
         # Initialize the TFLite interpreter
-        self.interpreter = tf.lite.Interpreter(model_path="movenet.tflite")
+        self.interpreter = tf.lite.Interpreter(model_path="test/4.tflite")
         self.interpreter.allocate_tensors()
 
         self.roi = RoI(shape)
@@ -207,7 +207,7 @@ class HumanPoseExtractor:
         subframe = self.roi.extract_subframe(frame)
 
         img = subframe.copy()
-        img = tf.image.resize_with_pad(np.expand_dims(img, axis=0), 192, 192)
+        img = tf.image.resize_with_pad(np.expand_dims(img, axis=0), 256, 256)
         input_image = tf.cast(img, dtype=tf.uint8)
         # input_image = tf.cast(img, dtype=tf.int32)
 
